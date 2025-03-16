@@ -1,0 +1,23 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model users {
+  tg_id    BigInt      @id
+  name     String
+  invited  invited[]   @relation("UserInvites")
+}
+
+model invited {
+  tg_id       BigInt
+  invited_by  BigInt
+  name        String
+  inviter     users      @relation("UserInvites", fields: [invited_by], references: [tg_id])
+
+  @@id([tg_id, invited_by]) // Composite primary key
+}

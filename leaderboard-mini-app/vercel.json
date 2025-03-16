@@ -1,0 +1,17 @@
+{
+  "version": 2,
+  "build": {
+    "env": {
+      "NEXT_TELEMETRY_DISABLED": "1"
+    }
+  },
+  "buildCommand": "npx prisma generate && pnpm run build",
+  "installCommand": "pnpm install",
+  "devCommand": "pnpm run dev",
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "/"
+    }
+  ]
+}
