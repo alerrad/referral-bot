@@ -4,6 +4,9 @@ Open-source referral telegram bot with leaderboard mini-app. Feel free to use th
 
 ![](https://img.shields.io/badge/license-MIT-blue) ![](https://flat.badgen.net/github/stars/alerrad/referral-bot)
 
+![preview](./leaderboard-mini-app/public/preview.png)
+*mini-app preview*
+
 ## Key Features 🚀
 
 - **Secure Invite Links**: Generate unique, secure invite links to accurately track referrals.
