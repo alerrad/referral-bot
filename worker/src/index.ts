@@ -1,225 +1,72 @@
+const json = (data: unknown, status = 200) => new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json; charset=UTF-8" } });
+
 interface Env {
   DB: D1Database;
-  BOT_TOKEN: string;
-  CHANNEL_USERNAME: string;
+  BOT_TOKEN?: string;
   BOT_USERNAME?: string;
-}
-
-type TelegramUser = { id: number; first_name?: string; last_name?: string };
-type TelegramMessage = { message_id: number; from?: TelegramUser; chat: { id: number }; text?: string };
-type TelegramUpdate = { message?: TelegramMessage };
-
-const json = (data: unknown, status = 200) => new Response(JSON.stringify(data), {
-  status,
-  headers: { "content-type": "application/json; charset=utf-8" },
-});
-
-async function ensureSchema(env: Env) {
-  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS users (
-    telegram_id INTEGER PRIMARY KEY,
-    name TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-  )`).run();
-
-  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS referrals (
-    invited_user_id INTEGER PRIMARY KEY,
-    inviter_id INTEGER NOT NULL,
-    invited_name TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (inviter_id) REFERENCES users(telegram_id)
-  )`).run();
-
-  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS pending_referrals (
-    invited_user_id INTEGER PRIMARY KEY,
-    inviter_id INTEGER NOT NULL,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (inviter_id) REFERENCES users(telegram_id)
-  )`).run();
-
-  await env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_referrals_inviter ON referrals(inviter_id)`).run();
-  await env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_pending_referrals_inviter ON pending_referrals(inviter_id)`).run();
+  CHANNEL_USERNAME: string;
 }
 
 async function telegram(env: Env, method: string, body: Record<string, unknown>) {
   if (!env.BOT_TOKEN) throw new Error("BOT_TOKEN secret is missing");
-
   const response = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
-
-  const result = await response.json() as any;
-  if (!response.ok || !result?.ok) {
-    throw new Error(`Telegram API ${method} failed: ${JSON.stringify(result)}`);
-  }
-  return result;
+  const data = await response.json() as { ok?: boolean; description?: string };
+  if (!data.ok) throw new Error(`Telegram API: ${data.description ?? "unknown error"}`);
+  return data;
 }
 
-async function sendMessage(
-  env: Env,
-  chatId: number,
-  text: string,
-  replyMarkup?: Record<string, unknown>,
-) {
-  const body: Record<string, unknown> = { chat_id: chatId, text };
-  if (replyMarkup) body.reply_markup = replyMarkup;
-  return telegram(env, "sendMessage", body);
+async function ensureSchema(env: Env) {
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS users (telegram_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT, referrals_count INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS referrals (id INTEGER PRIMARY KEY AUTOINCREMENT, inviter_id INTEGER NOT NULL, invited_id INTEGER NOT NULL UNIQUE, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS pending_referrals (invited_id INTEGER PRIMARY KEY, inviter_id INTEGER NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`).run();
 }
 
-async function ensureUser(env: Env, user: TelegramUser) {
-  const name = [user.first_name, user.last_name].filter(Boolean).join(" ") || "کاربر";
-  await env.DB.prepare("INSERT OR IGNORE INTO users (telegram_id, name) VALUES (?, ?)")
-    .bind(user.id, name).run();
-  await env.DB.prepare("UPDATE users SET name = ? WHERE telegram_id = ?")
-    .bind(name, user.id).run();
-  return name;
+function referralText(link: string) {
+  return `🌿 طبیعت را جور دیگری ببین…\n\nقاب‌هایی از زیبایی‌های طبیعت، تصویرهای چشم‌نواز و منظره‌هایی که آدم را برای چند لحظه از شلوغی دنیا دور می‌کنند. 🍃📷\n\nاگر عاشق طبیعت، تصویر و مناظر زیبا هستی، به Nature Plus سر بزن:\n\n🌱 @nature_plus\n\n✨ شاید اینجا همان چند لحظه آرامشی باشد که امروز به آن نیاز داری.\n\n🔗 ${link}`;
 }
 
-async function isChannelMember(env: Env, userId: number) {
-  const result = await telegram(env, "getChatMember", {
-    chat_id: `@${env.CHANNEL_USERNAME}`,
-    user_id: userId,
-  });
-  const status = result?.result?.status;
-  return ["creator", "administrator", "member"].includes(status);
+async function sendStart(env: Env, chatId: number, text: string) {
+  await telegram(env, "sendMessage", { chat_id: chatId, text });
 }
 
-async function referralCount(env: Env, userId: number) {
-  const row = await env.DB.prepare("SELECT COUNT(*) AS count FROM referrals WHERE inviter_id = ?")
-    .bind(userId).first<{ count: number }>();
-  return Number(row?.count ?? 0);
-}
+async function handleUpdate(update: any, env: Env) {
+  const message = update?.message;
+  if (!message?.chat?.id || !message?.text) return;
 
-async function leaderboard(env: Env) {
-  return env.DB.prepare(`
-    SELECT u.telegram_id, u.name, COUNT(r.invited_user_id) AS count
-    FROM users u JOIN referrals r ON r.inviter_id = u.telegram_id
-    GROUP BY u.telegram_id, u.name
-    ORDER BY count DESC, u.created_at ASC LIMIT 10
-  `).all<{ telegram_id: number; name: string; count: number }>();
-}
+  const chatId = Number(message.chat.id);
+  const text = String(message.text).trim();
+  const user = message.from ?? {};
 
-async function verifyReferral(env: Env, user: TelegramUser) {
-  const pending = await env.DB.prepare(
-    "SELECT inviter_id FROM pending_referrals WHERE invited_user_id = ?",
-  ).bind(user.id).first<{ inviter_id: number | null }>();
+  await ensureSchema(env);
+  await env.DB.prepare(`INSERT INTO users (telegram_id, username, first_name) VALUES (?, ?, ?) ON CONFLICT(telegram_id) DO UPDATE SET username=excluded.username, first_name=excluded.first_name`).bind(chatId, user.username ?? null, user.first_name ?? null).run();
 
-  if (!pending?.inviter_id || pending.inviter_id === user.id) return false;
-
-  const member = await isChannelMember(env, user.id);
-  if (!member) return false;
-
-  const already = await env.DB.prepare(
-    "SELECT invited_user_id FROM referrals WHERE invited_user_id = ?",
-  ).bind(user.id).first();
-  if (already) return true;
-
-  const name = [user.first_name, user.last_name].filter(Boolean).join(" ") || "کاربر";
-  await env.DB.prepare(
-    "INSERT OR IGNORE INTO referrals (invited_user_id, inviter_id, invited_name) VALUES (?, ?, ?)",
-  ).bind(user.id, pending.inviter_id, name).run();
-  await env.DB.prepare("DELETE FROM pending_referrals WHERE invited_user_id = ?")
-    .bind(user.id).run();
-  return true;
-}
-
-async function handleStart(env: Env, message: TelegramMessage, payload?: string) {
-  if (!message.from) return;
-  const user = message.from;
-  await ensureUser(env, user);
-
-  if (!payload) {
-    const count = await referralCount(env, user.id);
-    await sendMessage(env, message.chat.id,
-      `🌿 به Nature Plus خوش آمدی!\n\n👥 دعوت‌های موفق شما: ${count}\n\n🔗 برای دریافت پیام آماده دعوت، /ref_link را بزن.\n🏆 /leaderboard — برترین دعوت‌کنندگان\n📊 /position — رتبه من\n✅ /verify — بررسی عضویت و ثبت دعوت`);
-    return;
-  }
-
-  if (/^\d+$/.test(payload)) {
-    const inviterId = Number(payload);
-    if (inviterId === user.id) {
-      await sendMessage(env, message.chat.id, "❌ نمی‌توانی خودت را دعوت کنی.");
-      return;
+  if (text === "/start" || text.startsWith("/start ")) {
+    const payload = text.slice(6).trim();
+    if (payload && /^\d+$/.test(payload) && Number(payload) !== chatId) {
+      await env.DB.prepare(`INSERT OR REPLACE INTO pending_referrals (invited_id, inviter_id) VALUES (?, ?)`).bind(chatId, Number(payload)).run();
     }
 
-    const inviterExists = await env.DB.prepare("SELECT telegram_id FROM users WHERE telegram_id = ?")
-      .bind(inviterId).first();
-    const already = await env.DB.prepare("SELECT invited_user_id FROM referrals WHERE invited_user_id = ?")
-      .bind(user.id).first();
-
-    if (inviterExists && !already) {
-      await env.DB.prepare(
-        "INSERT OR REPLACE INTO pending_referrals (invited_user_id, inviter_id) VALUES (?, ?)",
-      ).bind(user.id, inviterId).run();
-    }
-  }
-
-  const verified = await verifyReferral(env, user);
-  const count = await referralCount(env, user.id);
-
-  if (!verified) {
-    await sendMessage(env, message.chat.id,
-      `🌿 برای ثبت دعوت، ابتدا عضو کانال @${env.CHANNEL_USERNAME} شو و سپس /verify را بفرست.\n\n👥 دعوت‌های موفق شما: ${count}`);
+    await sendStart(env, chatId, `🌿 به Nature Plus خوش آمدی!\n\nاینجا جایی برای تماشای طبیعت، تصویر و منظره‌های چشم‌نواز است. 🍃📷\n\nبرای دریافت لینک دعوت اختصاصی خودت، /ref_link را بزن.`);
     return;
   }
 
-  await sendMessage(env, message.chat.id,
-    `✅ دعوت با موفقیت ثبت شد! 🌿\n\n👥 دعوت‌های موفق شما: ${count}`);
-}
-
-async function handleCommand(env: Env, message: TelegramMessage, command: string) {
-  if (!message.from) return;
-  const user = message.from;
-  await ensureUser(env, user);
-
-  if (command === "/verify") {
-    const verified = await verifyReferral(env, user);
-    await sendMessage(env, message.chat.id,
-      verified ? "✅ عضویت تأیید شد و دعوت ثبت شد! 🌿" : `❌ هنوز عضویت تأیید نشده است. ابتدا عضو @${env.CHANNEL_USERNAME} شو و دوباره /verify را بزن.`);
+  if (text === "/ref_link") {
+    const username = env.BOT_USERNAME || "NPlussenderbot";
+    const link = `https://t.me/${username}?start=${chatId}`;
+    await telegram(env, "sendMessage", {
+      chat_id: chatId,
+      text: referralText(link),
+      reply_markup: { inline_keyboard: [[{ text: "🌿 اشتراک‌گذاری با دوستان", url: `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(referralText(link))}` }]] },
+    });
     return;
   }
 
-  if (command === "/ref_link") {
-    const username = (env.BOT_USERNAME || "").replace(/^@/, "") || "YOUR_BOT_USERNAME";
-    const link = `https://t.me/${username}?start=${user.id}`;
-    const shareText =
-      `🌿 یک کانال جذاب پیدا کردم: Nature Plus\n\n` +
-      `اگه به طبیعت، محیط‌زیست و محتوای مرتبط علاقه داری، حتماً عضو شو 👇\n\n` +
-      `@${env.CHANNEL_USERNAME}`;
-    const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(shareText)}`;
-
-    await sendMessage(
-      env,
-      message.chat.id,
-      `📩 پیام آماده دعوت از دوستان\n\n${shareText}\n\n🔗 لینک دعوت اختصاصی شما:\n${link}\n\n📤 برای ارسال مستقیم به دوستان، دکمه زیر را بزن.`,
-      {
-        inline_keyboard: [[
-          { text: "📤 ارسال برای دوستان", url: shareUrl },
-        ]],
-      },
-    );
-    return;
-  }
-
-  if (command === "/leaderboard") {
-    const result = await leaderboard(env);
-    const lines = (result.results || []).map((u, i) => `${i + 1}. ${u.name} — ${u.count} دعوت`);
-    await sendMessage(env, message.chat.id,
-      `🏆 برترین دعوت‌کنندگان Nature Plus\n\n${lines.join("\n") || "هنوز دعوتی ثبت نشده است."}`);
-    return;
-  }
-
-  if (command === "/position") {
-    const count = await referralCount(env, user.id);
-    const higher = await env.DB.prepare(`
-      SELECT COUNT(*) AS position FROM (
-        SELECT inviter_id, COUNT(*) AS count FROM referrals
-        GROUP BY inviter_id HAVING count > ?
-      )
-    `).bind(count).first<{ position: number }>();
-    const position = Number(higher?.position ?? 0) + 1;
-    await sendMessage(env, message.chat.id, `📊 دعوت‌های موفق: ${count}\n🏆 رتبه فعلی: ${position}`);
+  if (text === "/health") {
+    await sendStart(env, chatId, "✅ ربات فعال است.");
   }
 }
 
@@ -227,67 +74,34 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
-    if (request.method === "GET" && url.pathname === "/") {
-      return new Response("Nature Plus Referral Bot is running 🌿");
-    }
-
     if (request.method === "GET" && url.pathname === "/health") {
       const result: Record<string, unknown> = {
         worker: "ok",
-        botTokenConfigured: Boolean(env.BOT_TOKEN),
-        botUsernameConfigured: Boolean(env.BOT_USERNAME),
+        botTokenConfigured: !!env.BOT_TOKEN,
+        botUsernameConfigured: !!env.BOT_USERNAME,
         channel: env.CHANNEL_USERNAME,
       };
+      try { await ensureSchema(env); result.database = "ok"; } catch (error) { result.database = "error"; result.databaseError = String(error); }
       try {
-        await ensureSchema(env);
-        await env.DB.prepare("SELECT 1 AS ok").first();
-        result.database = "ok";
-      } catch (error) {
-        result.database = "error";
-        result.databaseError = String(error);
-      }
-      try {
-        const bot = await telegram(env, "getMe", {});
+        if (!env.BOT_TOKEN) throw new Error("BOT_TOKEN secret is missing");
+        const me = await telegram(env, "getMe", {});
         result.telegram = "ok";
-        result.bot = bot.result?.username ?? null;
-      } catch (error) {
-        result.telegram = "error";
-        result.telegramError = String(error);
-      }
+        result.bot = (me as any).result?.username ?? null;
+      } catch (error) { result.telegram = "error"; result.telegramError = String(error); }
       return json(result);
     }
 
-    if (request.method !== "POST" || url.pathname !== "/webhook") {
-      return json({ ok: false }, 404);
-    }
-
-    let update: TelegramUpdate;
-    try {
-      update = await request.json() as TelegramUpdate;
-    } catch {
-      return json({ ok: false, error: "invalid json" }, 400);
-    }
-
-    const message = update.message;
-    if (!message?.from || !message.text) return json({ ok: true });
-
-    try {
-      await ensureSchema(env);
-      const [command, payload] = message.text.trim().split(/\s+/, 2);
-      if (command === "/start") await handleStart(env, message, payload);
-      else if (["/verify", "/ref_link", "/leaderboard", "/position"].includes(command)) {
-        await handleCommand(env, message, command);
-      }
-    } catch (error) {
-      console.error("Webhook error:", error);
+    if (url.pathname === "/webhook" && request.method === "POST") {
       try {
-        await sendMessage(env, message.chat.id,
-          `❌ خطایی در ربات رخ داد.\n\nکد خطا: ${String(error).slice(0, 300)}`);
-      } catch (secondaryError) {
-        console.error("Failed to send error message:", secondaryError);
+        const update = await request.json();
+        await handleUpdate(update, env);
+        return json({ ok: true });
+      } catch (error) {
+        console.error("Webhook error:", error);
+        return json({ ok: false, error: String(error) }, 500);
       }
     }
 
-    return json({ ok: true });
+    return new Response("Nature Plus Referral Bot is running 🌿", { status: 200 });
   },
 };
