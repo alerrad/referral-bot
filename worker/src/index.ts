@@ -19,7 +19,6 @@ async function ensureSchema(env: Env) {
     CREATE TABLE IF NOT EXISTS users (
       telegram_id INTEGER PRIMARY KEY,
       name TEXT NOT NULL,
-      pending_inviter_id INTEGER,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -31,8 +30,15 @@ async function ensureSchema(env: Env) {
       FOREIGN KEY (inviter_id) REFERENCES users(telegram_id)
     );
 
-    CREATE INDEX IF NOT EXISTS idx_referrals_inviter
-    ON referrals(inviter_id);
+    CREATE TABLE IF NOT EXISTS pending_referrals (
+      invited_user_id INTEGER PRIMARY KEY,
+      inviter_id INTEGER NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (inviter_id) REFERENCES users(telegram_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_referrals_inviter ON referrals(inviter_id);
+    CREATE INDEX IF NOT EXISTS idx_pending_referrals_inviter ON pending_referrals(inviter_id);
   `);
 }
 
@@ -91,10 +97,10 @@ async function leaderboard(env: Env) {
 
 async function verifyReferral(env: Env, user: TelegramUser) {
   const pending = await env.DB.prepare(
-    "SELECT pending_inviter_id FROM users WHERE telegram_id = ?",
-  ).bind(user.id).first<{ pending_inviter_id: number | null }>();
+    "SELECT inviter_id FROM pending_referrals WHERE invited_user_id = ?",
+  ).bind(user.id).first<{ inviter_id: number | null }>();
 
-  if (!pending?.pending_inviter_id || pending.pending_inviter_id === user.id) return false;
+  if (!pending?.inviter_id || pending.inviter_id === user.id) return false;
 
   const member = await isChannelMember(env, user.id);
   if (!member) return false;
@@ -107,8 +113,8 @@ async function verifyReferral(env: Env, user: TelegramUser) {
   const name = [user.first_name, user.last_name].filter(Boolean).join(" ") || "کاربر";
   await env.DB.prepare(
     "INSERT OR IGNORE INTO referrals (invited_user_id, inviter_id, invited_name) VALUES (?, ?, ?)",
-  ).bind(user.id, pending.pending_inviter_id, name).run();
-  await env.DB.prepare("UPDATE users SET pending_inviter_id = NULL WHERE telegram_id = ?")
+  ).bind(user.id, pending.inviter_id, name).run();
+  await env.DB.prepare("DELETE FROM pending_referrals WHERE invited_user_id = ?")
     .bind(user.id).run();
   return true;
 }
@@ -118,7 +124,14 @@ async function handleStart(env: Env, message: TelegramMessage, payload?: string)
   const user = message.from;
   await ensureUser(env, user);
 
-  if (payload && /^\d+$/.test(payload)) {
+  if (!payload) {
+    const count = await referralCount(env, user.id);
+    await sendMessage(env, message.chat.id,
+      `🌿 به Nature Plus خوش آمدی!\n\n👥 دعوت‌های موفق شما: ${count}\n\n🔗 /ref_link — لینک دعوت اختصاصی\n🏆 /leaderboard — برترین دعوت‌کنندگان\n📊 /position — رتبه من\n✅ /verify — بررسی عضویت و ثبت دعوت`);
+    return;
+  }
+
+  if (/^\d+$/.test(payload)) {
     const inviterId = Number(payload);
     if (inviterId === user.id) {
       await sendMessage(env, message.chat.id, "❌ نمی‌توانی خودت را دعوت کنی.");
@@ -131,22 +144,23 @@ async function handleStart(env: Env, message: TelegramMessage, payload?: string)
       .bind(user.id).first();
 
     if (inviterExists && !already) {
-      await env.DB.prepare("UPDATE users SET pending_inviter_id = ? WHERE telegram_id = ?")
-        .bind(inviterId, user.id).run();
+      await env.DB.prepare(
+        "INSERT OR REPLACE INTO pending_referrals (invited_user_id, inviter_id) VALUES (?, ?)",
+      ).bind(user.id, inviterId).run();
     }
   }
 
   const verified = await verifyReferral(env, user);
   const count = await referralCount(env, user.id);
 
-  if (payload && !verified) {
+  if (!verified) {
     await sendMessage(env, message.chat.id,
       `🌿 برای ثبت دعوت، ابتدا عضو کانال @${env.CHANNEL_USERNAME} شو و سپس /verify را بفرست.\n\n👥 دعوت‌های موفق شما: ${count}`);
     return;
   }
 
   await sendMessage(env, message.chat.id,
-    `🌿 به Nature Plus خوش آمدی!\n\n👥 دعوت‌های موفق شما: ${count}\n\n🔗 /ref_link — لینک دعوت اختصاصی\n🏆 /leaderboard — برترین دعوت‌کنندگان\n📊 /position — رتبه من\n✅ /verify — بررسی عضویت و ثبت دعوت`);
+    `✅ دعوت با موفقیت ثبت شد! 🌿\n\n👥 دعوت‌های موفق شما: ${count}`);
 }
 
 async function handleCommand(env: Env, message: TelegramMessage, command: string) {
@@ -205,15 +219,14 @@ export default {
         botUsernameConfigured: Boolean(env.BOT_USERNAME),
         channel: env.CHANNEL_USERNAME,
       };
-
       try {
+        await ensureSchema(env);
         await env.DB.prepare("SELECT 1 AS ok").first();
         result.database = "ok";
       } catch (error) {
         result.database = "error";
         result.databaseError = String(error);
       }
-
       try {
         const bot = await telegram(env, "getMe", {});
         result.telegram = "ok";
@@ -222,7 +235,6 @@ export default {
         result.telegram = "error";
         result.telegramError = String(error);
       }
-
       return json(result);
     }
 
@@ -243,7 +255,6 @@ export default {
     try {
       await ensureSchema(env);
       const [command, payload] = message.text.trim().split(/\s+/, 2);
-
       if (command === "/start") await handleStart(env, message, payload);
       else if (["/verify", "/ref_link", "/leaderboard", "/position"].includes(command)) {
         await handleCommand(env, message, command);
@@ -252,7 +263,7 @@ export default {
       console.error("Webhook error:", error);
       try {
         await sendMessage(env, message.chat.id,
-          "❌ خطایی در ربات رخ داد. لطفاً چند لحظه بعد دوباره تلاش کن.");
+          `❌ خطایی در ربات رخ داد.\n\nکد خطا: ${String(error).slice(0, 300)}`);
       } catch (secondaryError) {
         console.error("Failed to send error message:", secondaryError);
       }
