@@ -2,9 +2,11 @@ name = "nature-plus-referral-bot"
 main = "src/index.ts"
 compatibility_date = "2026-08-24"
 
+[assets]
+not_found_handling = "single-page-application"
+
 [vars]
 CHANNEL_USERNAME = "nature_plus"
-BOT_USERNAME = "YourBotUsername"
 
 [[d1_databases]]
 binding = "DB"
