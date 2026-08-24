@@ -37,12 +37,19 @@ async function ensureSchema(env: Env) {
 }
 
 async function telegram(env: Env, method: string, body: Record<string, unknown>) {
+  if (!env.BOT_TOKEN) throw new Error("BOT_TOKEN secret is missing");
+
   const response = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
-  return response.json() as Promise<any>;
+
+  const result = await response.json() as any;
+  if (!response.ok || !result?.ok) {
+    throw new Error(`Telegram API ${method} failed: ${JSON.stringify(result)}`);
+  }
+  return result;
 }
 
 async function sendMessage(env: Env, chatId: number, text: string) {
@@ -64,7 +71,7 @@ async function isChannelMember(env: Env, userId: number) {
     user_id: userId,
   });
   const status = result?.result?.status;
-  return result?.ok && ["creator", "administrator", "member"].includes(status);
+  return ["creator", "administrator", "member"].includes(status);
 }
 
 async function referralCount(env: Env, userId: number) {
@@ -87,8 +94,7 @@ async function verifyReferral(env: Env, user: TelegramUser) {
     "SELECT pending_inviter_id FROM users WHERE telegram_id = ?",
   ).bind(user.id).first<{ pending_inviter_id: number | null }>();
 
-  if (!pending?.pending_inviter_id) return false;
-  if (pending.pending_inviter_id === user.id) return false;
+  if (!pending?.pending_inviter_id || pending.pending_inviter_id === user.id) return false;
 
   const member = await isChannelMember(env, user.id);
   if (!member) return false;
@@ -156,7 +162,7 @@ async function handleCommand(env: Env, message: TelegramMessage, command: string
   }
 
   if (command === "/ref_link") {
-    const username = env.BOT_USERNAME || "YOUR_BOT_USERNAME";
+    const username = (env.BOT_USERNAME || "").replace(/^@/, "") || "YOUR_BOT_USERNAME";
     const link = `https://t.me/${username}?start=${user.id}`;
     await sendMessage(env, message.chat.id,
       `🔗 لینک دعوت اختصاصی شما:\n${link}\n\nدوستانت را با این لینک دعوت کن. دعوت زمانی موفق ثبت می‌شود که دوستت عضو @${env.CHANNEL_USERNAME} شود.`);
@@ -187,17 +193,55 @@ async function handleCommand(env: Env, message: TelegramMessage, command: string
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+
     if (request.method === "GET" && url.pathname === "/") {
       return new Response("Nature Plus Referral Bot is running 🌿");
     }
-    if (request.method !== "POST" || url.pathname !== "/webhook") return json({ ok: false }, 404);
+
+    if (request.method === "GET" && url.pathname === "/health") {
+      const result: Record<string, unknown> = {
+        worker: "ok",
+        botTokenConfigured: Boolean(env.BOT_TOKEN),
+        botUsernameConfigured: Boolean(env.BOT_USERNAME),
+        channel: env.CHANNEL_USERNAME,
+      };
+
+      try {
+        await env.DB.prepare("SELECT 1 AS ok").first();
+        result.database = "ok";
+      } catch (error) {
+        result.database = "error";
+        result.databaseError = String(error);
+      }
+
+      try {
+        const bot = await telegram(env, "getMe", {});
+        result.telegram = "ok";
+        result.bot = bot.result?.username ?? null;
+      } catch (error) {
+        result.telegram = "error";
+        result.telegramError = String(error);
+      }
+
+      return json(result);
+    }
+
+    if (request.method !== "POST" || url.pathname !== "/webhook") {
+      return json({ ok: false }, 404);
+    }
+
+    let update: TelegramUpdate;
+    try {
+      update = await request.json() as TelegramUpdate;
+    } catch {
+      return json({ ok: false, error: "invalid json" }, 400);
+    }
+
+    const message = update.message;
+    if (!message?.from || !message.text) return json({ ok: true });
 
     try {
       await ensureSchema(env);
-
-      const update = (await request.json()) as TelegramUpdate;
-      const message = update.message;
-      if (!message?.from || !message.text) return json({ ok: true });
       const [command, payload] = message.text.trim().split(/\s+/, 2);
 
       if (command === "/start") await handleStart(env, message, payload);
@@ -205,17 +249,15 @@ export default {
         await handleCommand(env, message, command);
       }
     } catch (error) {
-      console.error(error);
-      if (request.method === "POST") {
-        try {
-          const update = (await request.clone().json()) as TelegramUpdate;
-          const chatId = update.message?.chat?.id;
-          if (chatId) await sendMessage(env, chatId, "❌ خطایی رخ داد. لطفاً دوباره تلاش کن.");
-        } catch {
-          // Ignore secondary error while responding to Telegram.
-        }
+      console.error("Webhook error:", error);
+      try {
+        await sendMessage(env, message.chat.id,
+          "❌ خطایی در ربات رخ داد. لطفاً چند لحظه بعد دوباره تلاش کن.");
+      } catch (secondaryError) {
+        console.error("Failed to send error message:", secondaryError);
       }
     }
+
     return json({ ok: true });
   },
 };
