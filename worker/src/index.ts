@@ -15,31 +15,29 @@ const json = (data: unknown, status = 200) => new Response(JSON.stringify(data),
 });
 
 async function ensureSchema(env: Env) {
-  await env.DB.exec(`
-    CREATE TABLE IF NOT EXISTS users (
-      telegram_id INTEGER PRIMARY KEY,
-      name TEXT NOT NULL,
-      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-    );
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS users (
+    telegram_id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`).run();
 
-    CREATE TABLE IF NOT EXISTS referrals (
-      invited_user_id INTEGER PRIMARY KEY,
-      inviter_id INTEGER NOT NULL,
-      invited_name TEXT NOT NULL,
-      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (inviter_id) REFERENCES users(telegram_id)
-    );
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS referrals (
+    invited_user_id INTEGER PRIMARY KEY,
+    inviter_id INTEGER NOT NULL,
+    invited_name TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (inviter_id) REFERENCES users(telegram_id)
+  )`).run();
 
-    CREATE TABLE IF NOT EXISTS pending_referrals (
-      invited_user_id INTEGER PRIMARY KEY,
-      inviter_id INTEGER NOT NULL,
-      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (inviter_id) REFERENCES users(telegram_id)
-    );
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS pending_referrals (
+    invited_user_id INTEGER PRIMARY KEY,
+    inviter_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (inviter_id) REFERENCES users(telegram_id)
+  )`).run();
 
-    CREATE INDEX IF NOT EXISTS idx_referrals_inviter ON referrals(inviter_id);
-    CREATE INDEX IF NOT EXISTS idx_pending_referrals_inviter ON pending_referrals(inviter_id);
-  `);
+  await env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_referrals_inviter ON referrals(inviter_id)`).run();
+  await env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_pending_referrals_inviter ON pending_referrals(inviter_id)`).run();
 }
 
 async function telegram(env: Env, method: string, body: Record<string, unknown>) {
