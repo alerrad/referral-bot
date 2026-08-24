@@ -56,8 +56,15 @@ async function telegram(env: Env, method: string, body: Record<string, unknown>)
   return result;
 }
 
-async function sendMessage(env: Env, chatId: number, text: string) {
-  return telegram(env, "sendMessage", { chat_id: chatId, text });
+async function sendMessage(
+  env: Env,
+  chatId: number,
+  text: string,
+  replyMarkup?: Record<string, unknown>,
+) {
+  const body: Record<string, unknown> = { chat_id: chatId, text };
+  if (replyMarkup) body.reply_markup = replyMarkup;
+  return telegram(env, "sendMessage", body);
 }
 
 async function ensureUser(env: Env, user: TelegramUser) {
@@ -125,7 +132,7 @@ async function handleStart(env: Env, message: TelegramMessage, payload?: string)
   if (!payload) {
     const count = await referralCount(env, user.id);
     await sendMessage(env, message.chat.id,
-      `🌿 به Nature Plus خوش آمدی!\n\n👥 دعوت‌های موفق شما: ${count}\n\n🔗 /ref_link — لینک دعوت اختصاصی\n🏆 /leaderboard — برترین دعوت‌کنندگان\n📊 /position — رتبه من\n✅ /verify — بررسی عضویت و ثبت دعوت`);
+      `🌿 به Nature Plus خوش آمدی!\n\n👥 دعوت‌های موفق شما: ${count}\n\n🔗 برای دریافت پیام آماده دعوت، /ref_link را بزن.\n🏆 /leaderboard — برترین دعوت‌کنندگان\n📊 /position — رتبه من\n✅ /verify — بررسی عضویت و ثبت دعوت`);
     return;
   }
 
@@ -176,8 +183,22 @@ async function handleCommand(env: Env, message: TelegramMessage, command: string
   if (command === "/ref_link") {
     const username = (env.BOT_USERNAME || "").replace(/^@/, "") || "YOUR_BOT_USERNAME";
     const link = `https://t.me/${username}?start=${user.id}`;
-    await sendMessage(env, message.chat.id,
-      `🔗 لینک دعوت اختصاصی شما:\n${link}\n\nدوستانت را با این لینک دعوت کن. دعوت زمانی موفق ثبت می‌شود که دوستت عضو @${env.CHANNEL_USERNAME} شود.`);
+    const shareText =
+      `🌿 یک کانال جذاب پیدا کردم: Nature Plus\n\n` +
+      `اگه به طبیعت، محیط‌زیست و محتوای مرتبط علاقه داری، حتماً عضو شو 👇\n\n` +
+      `@${env.CHANNEL_USERNAME}`;
+    const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(shareText)}`;
+
+    await sendMessage(
+      env,
+      message.chat.id,
+      `📩 پیام آماده دعوت از دوستان\n\n${shareText}\n\n🔗 لینک دعوت اختصاصی شما:\n${link}\n\n📤 برای ارسال مستقیم به دوستان، دکمه زیر را بزن.`,
+      {
+        inline_keyboard: [[
+          { text: "📤 ارسال برای دوستان", url: shareUrl },
+        ]],
+      },
+    );
     return;
   }
 
