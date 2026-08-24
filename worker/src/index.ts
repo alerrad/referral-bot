@@ -14,6 +14,28 @@ const json = (data: unknown, status = 200) => new Response(JSON.stringify(data),
   headers: { "content-type": "application/json; charset=utf-8" },
 });
 
+async function ensureSchema(env: Env) {
+  await env.DB.exec(`
+    CREATE TABLE IF NOT EXISTS users (
+      telegram_id INTEGER PRIMARY KEY,
+      name TEXT NOT NULL,
+      pending_inviter_id INTEGER,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS referrals (
+      invited_user_id INTEGER PRIMARY KEY,
+      inviter_id INTEGER NOT NULL,
+      invited_name TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (inviter_id) REFERENCES users(telegram_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_referrals_inviter
+    ON referrals(inviter_id);
+  `);
+}
+
 async function telegram(env: Env, method: string, body: Record<string, unknown>) {
   const response = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`, {
     method: "POST",
@@ -170,19 +192,29 @@ export default {
     }
     if (request.method !== "POST" || url.pathname !== "/webhook") return json({ ok: false }, 404);
 
-    const update = (await request.json()) as TelegramUpdate;
-    const message = update.message;
-    if (!message?.from || !message.text) return json({ ok: true });
-    const [command, payload] = message.text.trim().split(/\s+/, 2);
-
     try {
+      await ensureSchema(env);
+
+      const update = (await request.json()) as TelegramUpdate;
+      const message = update.message;
+      if (!message?.from || !message.text) return json({ ok: true });
+      const [command, payload] = message.text.trim().split(/\s+/, 2);
+
       if (command === "/start") await handleStart(env, message, payload);
       else if (["/verify", "/ref_link", "/leaderboard", "/position"].includes(command)) {
         await handleCommand(env, message, command);
       }
     } catch (error) {
       console.error(error);
-      await sendMessage(env, message.chat.id, "❌ خطایی رخ داد. لطفاً دوباره تلاش کن.");
+      if (request.method === "POST") {
+        try {
+          const update = (await request.clone().json()) as TelegramUpdate;
+          const chatId = update.message?.chat?.id;
+          if (chatId) await sendMessage(env, chatId, "❌ خطایی رخ داد. لطفاً دوباره تلاش کن.");
+        } catch {
+          // Ignore secondary error while responding to Telegram.
+        }
+      }
     }
     return json({ ok: true });
   },
