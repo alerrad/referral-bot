@@ -4,6 +4,7 @@ compatibility_date = "2026-08-24"
 
 [vars]
 CHANNEL_USERNAME = "nature_plus"
+BOT_USERNAME = "YourBotUsername"
 
 [[d1_databases]]
 binding = "DB"
