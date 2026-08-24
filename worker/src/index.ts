@@ -19,18 +19,14 @@ async function telegram(env: Env, method: string, body: Record<string, unknown>)
   return data;
 }
 
-async function ensureSchema(env: Env) {
-  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS users (telegram_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT, referrals_count INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`).run();
-  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS referrals (id INTEGER PRIMARY KEY AUTOINCREMENT, inviter_id INTEGER NOT NULL, invited_id INTEGER NOT NULL UNIQUE, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`).run();
-  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS pending_referrals (invited_id INTEGER PRIMARY KEY, inviter_id INTEGER NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`).run();
+async function checkDatabase(env: Env) {
+  await env.DB.prepare("SELECT 1 FROM users LIMIT 1").run();
+  await env.DB.prepare("SELECT 1 FROM referrals LIMIT 1").run();
+  await env.DB.prepare("SELECT 1 FROM pending_referrals LIMIT 1").run();
 }
 
 function referralText(link: string) {
   return `🌿 طبیعت را جور دیگری ببین…\n\nقاب‌هایی از زیبایی‌های طبیعت، تصویرهای چشم‌نواز و منظره‌هایی که آدم را برای چند لحظه از شلوغی دنیا دور می‌کنند. 🍃📷\n\nاگر عاشق طبیعت، تصویر و مناظر زیبا هستی، به Nature Plus سر بزن:\n\n🌱 @nature_plus\n\n✨ شاید اینجا همان چند لحظه آرامشی باشد که امروز به آن نیاز داری.\n\n🔗 ${link}`;
-}
-
-async function sendStart(env: Env, chatId: number, text: string) {
-  await telegram(env, "sendMessage", { chat_id: chatId, text });
 }
 
 async function handleUpdate(update: any, env: Env) {
@@ -40,33 +36,47 @@ async function handleUpdate(update: any, env: Env) {
   const chatId = Number(message.chat.id);
   const text = String(message.text).trim();
   const user = message.from ?? {};
+  const name = String(user.first_name ?? user.username ?? "کاربر").slice(0, 255);
 
-  await ensureSchema(env);
-  await env.DB.prepare(`INSERT INTO users (telegram_id, username, first_name) VALUES (?, ?, ?) ON CONFLICT(telegram_id) DO UPDATE SET username=excluded.username, first_name=excluded.first_name`).bind(chatId, user.username ?? null, user.first_name ?? null).run();
+  await checkDatabase(env);
+  await env.DB.prepare(`INSERT INTO users (telegram_id, name) VALUES (?, ?) ON CONFLICT(telegram_id) DO UPDATE SET name=excluded.name`).bind(chatId, name).run();
 
   if (text === "/start" || text.startsWith("/start ")) {
     const payload = text.slice(6).trim();
     if (payload && /^\d+$/.test(payload) && Number(payload) !== chatId) {
-      await env.DB.prepare(`INSERT OR REPLACE INTO pending_referrals (invited_id, inviter_id) VALUES (?, ?)`).bind(chatId, Number(payload)).run();
+      const inviterId = Number(payload);
+      const inviter = await env.DB.prepare("SELECT telegram_id FROM users WHERE telegram_id = ?").bind(inviterId).first();
+      if (inviter) {
+        await env.DB.prepare(`INSERT OR REPLACE INTO pending_referrals (invited_user_id, inviter_id) VALUES (?, ?)`).bind(chatId, inviterId).run();
+      }
     }
 
-    await sendStart(env, chatId, `🌿 به Nature Plus خوش آمدی!\n\nاینجا جایی برای تماشای طبیعت، تصویر و منظره‌های چشم‌نواز است. 🍃📷\n\nبرای دریافت لینک دعوت اختصاصی خودت، /ref_link را بزن.`);
+    await telegram(env, "sendMessage", {
+      chat_id: chatId,
+      text: `🌿 به Nature Plus خوش آمدی!\n\nاینجا جایی برای تماشای طبیعت، تصویر و منظره‌های چشم‌نواز است. 🍃📷\n\nبرای دریافت لینک دعوت اختصاصی خودت، /ref_link را بزن.`,
+    });
     return;
   }
 
   if (text === "/ref_link") {
     const username = env.BOT_USERNAME || "NPlussenderbot";
     const link = `https://t.me/${username}?start=${chatId}`;
+    const shareText = referralText(link);
     await telegram(env, "sendMessage", {
       chat_id: chatId,
-      text: referralText(link),
-      reply_markup: { inline_keyboard: [[{ text: "🌿 اشتراک‌گذاری با دوستان", url: `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(referralText(link))}` }]] },
+      text: shareText,
+      reply_markup: {
+        inline_keyboard: [[{
+          text: "🌿 اشتراک‌گذاری با دوستان",
+          url: `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(shareText)}`,
+        }]],
+      },
     });
     return;
   }
 
   if (text === "/health") {
-    await sendStart(env, chatId, "✅ ربات فعال است.");
+    await telegram(env, "sendMessage", { chat_id: chatId, text: "✅ ربات فعال است." });
   }
 }
 
@@ -81,7 +91,7 @@ export default {
         botUsernameConfigured: !!env.BOT_USERNAME,
         channel: env.CHANNEL_USERNAME,
       };
-      try { await ensureSchema(env); result.database = "ok"; } catch (error) { result.database = "error"; result.databaseError = String(error); }
+      try { await checkDatabase(env); result.database = "ok"; } catch (error) { result.database = "error"; result.databaseError = String(error); }
       try {
         if (!env.BOT_TOKEN) throw new Error("BOT_TOKEN secret is missing");
         const me = await telegram(env, "getMe", {});
