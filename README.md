@@ -1,42 +1,101 @@
-# Referral Telegram Bot 🤖
+# 🌿 ربات دعوت دوستان Nature Plus
 
-Open-source referral telegram bot with leaderboard mini-app. Feel free to use this minimal version for your own projects or to extend logic of this one for your needs.
+نسخه سبک و فارسی ربات Referral برای کانال [@nature_plus](https://t.me/nature_plus).
 
-![](https://img.shields.io/badge/license-MIT-blue) ![](https://flat.badgen.net/github/stars/alerrad/referral-bot)
+این Fork علاوه بر نسخه اصلی، یک پیاده‌سازی سبک برای **Cloudflare Workers + D1** دارد.
 
-![preview](./leaderboard-mini-app/public/preview.png)
-*mini-app preview*
+## امکانات
 
-## Key Features 🚀
+- 🇮🇷 رابط و پیام‌های فارسی
+- 🔗 لینک دعوت اختصاصی برای هر عضو
+- 👥 شمارش دعوت‌های موفق
+- 🏆 جدول ۱۰ نفر برتر
+- 📊 نمایش رتبه کاربر
+- 🚫 جلوگیری از دعوت کردن خود
+- 🔒 هر کاربر فقط یک بار می‌تواند به‌عنوان دعوت موفق ثبت شود
+- ✅ بررسی عضویت واقعی در `@nature_plus` قبل از ثبت دعوت
+- ☁️ بدون VPS؛ مناسب Cloudflare Workers + D1
 
-- **Secure Invite Links**: Generate unique, secure invite links to accurately track referrals.
-- **Leaderboard Mini-App**: Visual leaderboard with real-time updates to enhance user engagement.
-- **Pagination & Search**: Quickly search participants by name and paginate results efficiently.
-- **Anti-Flood Protection**: Uses Redis caching to prevent spam and abuse.
-- **Personal Position Tracking**: Allows users to monitor their referral ranking easily.
-- **Scalable & Maintainable**: Structured codebase that's easy to extend or adapt.
+## راه‌اندازی Cloudflare
 
-## To-do 📝
+وارد پوشه `worker` شوید:
 
-- Add admin panel
-- Complete multi-language support
+```bash
+cd worker
+npm install
+```
 
-## Quick Start 🛠
+### 1. ساخت D1
 
-1. Clone this repo
-2. Configure .env(s) as in .example
-3. Run bot's compose ```docker-compose up --build -d```
-4. Host the mini-app on any provider & copy link
-5. Embed the link to your bot through [@BotFather](https://t.me/BotFather) on Telegram
+```bash
+npx wrangler d1 create nature-plus-referrals
+```
 
-## Contribution 🤝
-Contributions are welcome! Feel free to open issues or submit pull requests.
+شناسه دیتابیس را در `worker/wrangler.toml` جایگزین `YOUR_D1_DATABASE_ID` کنید.
 
-1) Fork the project
-2) Create your Feature Branch
-3) Commit your Changes & push to the Branch
-4) Open a Pull Request
+### 2. ساخت جداول
 
-## License
+```bash
+npx wrangler d1 execute nature-plus-referrals --remote --file=./schema.sql
+```
 
-Distributed under [MIT License](./LICENSE).
+### 3. تنظیم Secretها
+
+```bash
+npx wrangler secret put BOT_TOKEN
+```
+
+و نام کاربری ربات را در `wrangler.toml` قرار دهید:
+
+```toml
+[vars]
+CHANNEL_USERNAME = "nature_plus"
+BOT_USERNAME = "YourBotUsername"
+```
+
+### 4. Deploy
+
+```bash
+npx wrangler deploy
+```
+
+### 5. تنظیم Webhook
+
+پس از Deploy، آدرس Worker را به شکل زیر به Telegram معرفی کنید:
+
+```text
+https://YOUR-WORKER-DOMAIN/webhook
+```
+
+ربات را به کانال `@nature_plus` اضافه کنید و برای بررسی عضویت کاربران، دسترسی مناسب مدیریتی به ربات بدهید.
+
+## دستورات ربات
+
+```text
+/start       شروع کار
+/ref_link    دریافت لینک دعوت
+/verify      بررسی عضویت و ثبت دعوت
+/leaderboard جدول برترین‌ها
+/position    رتبه من
+```
+
+## نکته مهم
+
+برای اینکه بررسی عضویت کانال با `getChatMember` درست کار کند، ربات باید دسترسی لازم در کانال `@nature_plus` را داشته باشد.
+
+## ساختار Worker
+
+```text
+worker/
+├── src/
+│   └── index.ts
+├── schema.sql
+├── package.json
+└── wrangler.toml
+```
+
+نسخه Python اصلی پروژه در پوشه `bot/` حفظ شده است؛ پیاده‌سازی Cloudflare سبک در `worker/` قرار دارد تا مهاجرت به Workers بدون وابستگی به PostgreSQL، Redis و Docker انجام شود.
+
+## مجوز
+
+MIT — بر پایه پروژه اصلی `alerrad/referral-bot`.

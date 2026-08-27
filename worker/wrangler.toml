@@ -1,0 +1,11 @@
+name = "referral-bot"
+main = "src/index.ts"
+compatibility_date = "2026-08-24"
+
+[vars]
+CHANNEL_USERNAME = "nature_plus"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "nature-plus-referrals"
+database_id = "d0c40332-f764-4f85-a4b1-d5c37a170091"
